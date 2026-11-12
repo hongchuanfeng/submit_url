@@ -1,0 +1,50 @@
+1、使用next.js 开发一个把一个网站的sitemap.xml 里面的url 都提交到百度搜索引擎中，在页面输入一个xml的url地址，然后对该url进行解析里面的url，
+然后利用百度的接口提交该解析出来的url 的集合，接口说明如下：
+
+http://data.zz.baidu.com/urls?site=https://www.zorezoro.com&token=vwlYEFEPoi0WGUkE
+
+参数名称	是否必选	参数类型	说明
+site	是	string	在搜索资源平台验证的站点，比如www.example.com
+token	是	string	在搜索资源平台申请的推送用的准入密钥
+
+将要提交的链接按照每行一条的格式写入一个文本文件中，命名此文件为urls.txt，然后进入该文件所在目录，执行如下命令：
+curl -H 'Content-Type:text/plain' --data-binary @urls.txt "http://data.zz.baidu.com/urls?site=https://www.zorezoro.com&token=vwlYEFEPoi0WGUkE"
+
+上面的是curl的方法，你可以转为next.js的方式。
+
+查看推送反馈
+推送成功
+状态码为200，可能返回以下字段：
+
+字段	是否必选	参数类型	说明
+success	是	int	成功推送的url条数
+remain	是	int	当天剩余的可推送url条数
+not_same_site	否	array	由于不是本站url而未处理的url列表
+not_valid	否	array	不合法的url列表
+成功返回示例：
+
+{
+    "remain":99998,
+    "success":2,
+    "not_same_site":[],
+    "not_valid":[]
+}
+
+推送失败
+
+状态码为4xx，返回字段有：
+字段	是否必传	类型	说明
+error	是	int	错误码，与状态码相同
+message	是	string	错误描述
+失败返回示例：
+
+{
+    "error":401,
+    "message":"token is not valid"
+}
+			
+
+
+
+2、代码保存到该项目的根目录下。
+
