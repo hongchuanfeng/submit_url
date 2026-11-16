@@ -4,6 +4,9 @@
  */
 import { pushUrls, normalizeSite, explainBaiduError } from '../lib/baidu';
 
+// 固定使用百度官方地址，避免本机环境变量（BAIDU_ENDPOINT）影响测试
+process.env.BAIDU_ENDPOINT = 'http://data.zz.baidu.com/urls';
+
 type Responder = (urls: string[]) => { status: number; body: unknown };
 
 const originalFetch = globalThis.fetch;

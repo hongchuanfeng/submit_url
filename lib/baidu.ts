@@ -1,4 +1,15 @@
-const BAIDU_ENDPOINT = 'http://data.zz.baidu.com/urls';
+import { normalizeSite } from './site';
+
+export { normalizeSite };
+
+/**
+ * 百度推送接口地址。
+ * 默认指向百度官方接口；可通过环境变量覆盖（仅用于本地联调）。
+ * 在请求时读取，方便测试用例临时切换到假服务器。
+ */
+function baiduEndpoint(): string {
+  return process.env.BAIDU_ENDPOINT?.trim() || 'http://data.zz.baidu.com/urls';
+}
 
 /** 百度单次推送的条数上限 */
 export const BAIDU_BATCH_SIZE = 2000;
@@ -10,17 +21,22 @@ const PROBE_SIZE = 1;
 export type PushItemStatus =
   | 'success' // 推送成功
   | 'not_same_site' // 失败：不是本站链接
-  | 'not_valid' // 失败：不合法的链接
+  | 'not_valid' // 失败：不合法的 url
   | 'rejected' // 失败：百度未计入成功条数
-  | 'quota'; // 未提交：当日配额已用尽
+  | 'quota' // 未提交：当日配额已用尽
+  | 'duplicate' // 未重复提交：已在其它 sitemap 中提交过
+  | 'error'; // 未提交：接口报错
 
 export interface PushItem {
   url: string;
   status: PushItemStatus;
   /** 中文说明 */
   message: string;
+  /** 该链接来自哪个 sitemap（分组提交时使用） */
+  sitemap?: string;
 }
 
+/** 逐条推送结果的汇总 */
 export interface BaiduPushResult {
   success: number;
   remain: number;
@@ -39,12 +55,25 @@ export interface BaiduPushResult {
   status: number;
 }
 
+/** 单个 sitemap（一组链接）的推送结果 */
+export interface PushGroupResult {
+  success: number;
+  remain: number;
+  sent: number;
+  unsent: number;
+  quotaExhausted: boolean;
+  requests: number;
+  items: PushItem[];
+}
+
 export const PUSH_STATUS_TEXT: Record<PushItemStatus, string> = {
   success: '成功',
   not_same_site: '失败：非本站链接',
   not_valid: '失败：链接不合法',
   rejected: '失败：百度未确认接收',
   quota: '未提交：当日配额已用尽',
+  duplicate: '未重复提交：已在其它 sitemap 中提交',
+  error: '未提交：接口报错',
 };
 
 export class BaiduError extends Error {
@@ -60,21 +89,8 @@ export class BaiduError extends Error {
 }
 
 /**
- * 规范化 site 参数。
- * 百度只接受裸域名（www.zorezoro.com），传 https://www.zorezoro.com 会返回 "site init fail"。
+ * 把百度返回的英文错误码翻译成可读的中文提示
  */
-export function normalizeSite(site: string): string {
-  const value = site.trim();
-  if (!value) return value;
-  try {
-    const url = new URL(value.includes('://') ? value : `https://${value}`);
-    return url.host.toLowerCase();
-  } catch {
-    return value.toLowerCase().replace(/^\/+|\/+$/g, '');
-  }
-}
-
-/** 把百度返回的英文错误码翻译成可读的中文提示 */
 export function explainBaiduError(message: string): string {
   const text = message.toLowerCase();
 
@@ -109,7 +125,7 @@ interface RawResponse {
 }
 
 async function postBatch(site: string, token: string, urls: string[]): Promise<RawResponse> {
-  const endpoint = `${BAIDU_ENDPOINT}?site=${encodeURIComponent(site)}&token=${encodeURIComponent(token)}`;
+  const endpoint = `${baiduEndpoint()}?site=${encodeURIComponent(site)}&token=${encodeURIComponent(token)}`;
   const body = urls.join('\n');
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30_000);
@@ -161,33 +177,47 @@ async function postBatch(site: string, token: string, urls: string[]): Promise<R
 }
 
 /**
- * 按百度接口要求推送链接集合：每行一条，纯文本 body。
+ * 提交一组链接（通常是一个 sitemap 的全部链接）。
  *
  * 关键点：百度会整批校验剩余额度——只要本次提交的条数超过当天剩余额度（remain），
  * 整批都会被拒绝并返回 "over quota"，而不是部分接收。因此这里先用 1 条做探测，
  * 拿到真实 remain 后，再按 min(2000, remain) 分批提交。
+ *
+ * 该函数不会因为额度用尽而抛错：剩余的链接会被标记为 quota（未提交）后正常返回，
+ * 这样调用方可以继续提交下一组（下一个 sitemap）。
  */
-export async function pushUrls(site: string, token: string, urls: string[]): Promise<BaiduPushResult> {
+export async function pushUrlGroup(
+  site: string,
+  token: string,
+  urls: string[],
+  options: { sitemap?: string; initialRemain?: number } = {},
+): Promise<PushGroupResult> {
+  const items: PushItem[] = [];
+  const normalizedSite = normalizeSite(site);
+  const label = options.sitemap;
+
   if (urls.length === 0) {
-    throw new BaiduError('没有可推送的链接（解析结果为空，或全部被站点过滤规则过滤掉了）', 400);
+    return {
+      success: 0,
+      remain: options.initialRemain ?? 0,
+      sent: 0,
+      unsent: 0,
+      quotaExhausted: false,
+      requests: 0,
+      items,
+    };
   }
 
-  const normalizedSite = normalizeSite(site);
-  const totals = {
-    success: 0,
-    remain: 0,
-    notSameSite: [] as string[],
-    notValid: [] as string[],
-    sent: 0,
-    requests: 0,
-  };
-  const items: PushItem[] = [];
+  let remain = options.initialRemain ?? 0;
+  let requests = 0;
+  let success = 0;
+  let sent = 0;
   let quotaExhausted = false;
   let cursor = 0;
 
   while (cursor < urls.length) {
     // 探测阶段只发 1 条，用于拿到当天剩余额度；之后按剩余额度分批。
-    const size = totals.requests === 0 ? PROBE_SIZE : Math.min(BAIDU_BATCH_SIZE, totals.remain);
+    const size = requests === 0 ? PROBE_SIZE : Math.min(BAIDU_BATCH_SIZE, remain);
     const batchSize = Math.max(1, Math.min(size, urls.length - cursor));
     const batch = urls.slice(cursor, cursor + batchSize);
 
@@ -196,35 +226,25 @@ export async function pushUrls(site: string, token: string, urls: string[]): Pro
       raw = await postBatch(normalizedSite, token, batch);
     } catch (error) {
       if (error instanceof BaiduError && error.result?.quotaExhausted) {
-        // 额度不足：这一批及其之后的链接都没有被百度接收
+        // 额度不足：这一批及其之后的链接都没有被百度接收（不抛错，交给调用方继续下一组）
         quotaExhausted = true;
-        totals.sent = cursor;
+        sent = cursor;
         for (const url of urls.slice(cursor)) {
-          items.push({
-            url,
-            status: 'quota',
-            message: PUSH_STATUS_TEXT.quota,
-          });
+          items.push({ url, status: 'quota', message: PUSH_STATUS_TEXT.quota, sitemap: label });
         }
         break;
       }
       throw error;
     }
 
-    totals.requests += 1;
-    totals.sent += batch.length;
+    requests += 1;
+    sent += batch.length;
     cursor += batch.length;
 
     const { payload } = raw;
     const batchSuccess = typeof payload.success === 'number' ? payload.success : 0;
-    totals.success += batchSuccess;
-    totals.remain = typeof payload.remain === 'number' ? payload.remain : totals.remain;
-    if (Array.isArray(payload.not_same_site)) {
-      totals.notSameSite.push(...(payload.not_same_site as string[]));
-    }
-    if (Array.isArray(payload.not_valid)) {
-      totals.notValid.push(...(payload.not_valid as string[]));
-    }
+    success += batchSuccess;
+    remain = typeof payload.remain === 'number' ? payload.remain : remain;
 
     const batchNotSame = Array.isArray(payload.not_same_site) ? (payload.not_same_site as string[]) : [];
     const batchNotValid = Array.isArray(payload.not_valid) ? (payload.not_valid as string[]) : [];
@@ -237,9 +257,9 @@ export async function pushUrls(site: string, token: string, urls: string[]): Pro
 
     for (const url of batch) {
       if (notValidSet.has(url)) {
-        items.push({ url, status: 'not_valid', message: PUSH_STATUS_TEXT.not_valid });
+        items.push({ url, status: 'not_valid', message: PUSH_STATUS_TEXT.not_valid, sitemap: label });
       } else if (notSameSet.has(url)) {
-        items.push({ url, status: 'not_same_site', message: PUSH_STATUS_TEXT.not_same_site });
+        items.push({ url, status: 'not_same_site', message: PUSH_STATUS_TEXT.not_same_site, sitemap: label });
       } else {
         pending.push(url);
       }
@@ -247,31 +267,54 @@ export async function pushUrls(site: string, token: string, urls: string[]): Pro
 
     pending.forEach((url, index) => {
       if (index < batchSuccess) {
-        items.push({ url, status: 'success', message: PUSH_STATUS_TEXT.success });
+        items.push({ url, status: 'success', message: PUSH_STATUS_TEXT.success, sitemap: label });
       } else {
-        items.push({ url, status: 'rejected', message: PUSH_STATUS_TEXT.rejected });
+        items.push({ url, status: 'rejected', message: PUSH_STATUS_TEXT.rejected, sitemap: label });
       }
     });
 
-    if (totals.remain <= 0) {
+    if (remain <= 0) {
       quotaExhausted = true;
       for (const url of urls.slice(cursor)) {
-        items.push({ url, status: 'quota', message: PUSH_STATUS_TEXT.quota });
+        items.push({ url, status: 'quota', message: PUSH_STATUS_TEXT.quota, sitemap: label });
       }
       break;
     }
   }
 
   return {
-    success: totals.success,
-    remain: totals.remain,
-    notSameSite: totals.notSameSite,
-    notValid: totals.notValid,
-    sent: totals.sent,
-    unsent: urls.length - totals.sent,
+    success,
+    remain,
+    sent,
+    unsent: urls.length - sent,
     quotaExhausted,
-    requests: totals.requests,
+    requests,
     items,
+  };
+}
+
+/**
+ * 一次性提交所有链接（不分组）。若需要「按 sitemap 分组提交」，请使用 pushUrlGroup。
+ */
+export async function pushUrls(site: string, token: string, urls: string[]): Promise<BaiduPushResult> {
+  if (urls.length === 0) {
+    throw new BaiduError('没有可推送的链接（解析结果为空，或全部被站点过滤规则过滤掉了）', 400);
+  }
+
+  const group = await pushUrlGroup(site, token, urls);
+
+  return {
+    success: group.success,
+    remain: group.remain,
+    notSameSite: group.items
+      .filter((item) => item.status === 'not_same_site')
+      .map((item) => item.url),
+    notValid: group.items.filter((item) => item.status === 'not_valid').map((item) => item.url),
+    sent: group.sent,
+    unsent: group.unsent,
+    quotaExhausted: group.quotaExhausted,
+    requests: group.requests,
+    items: group.items,
     status: 200,
   };
 }

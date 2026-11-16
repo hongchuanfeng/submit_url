@@ -14,6 +14,8 @@ const MAX_BYTES = 10 * 1024 * 1024;
 const MAX_DEPTH = 5;
 const MAX_CHILD_SITEMAPS = 50;
 const MAX_CONCURRENCY = 5;
+/** 批量解析多个 sitemap 时的并发数 */
+const BATCH_CONCURRENCY = 3;
 
 export class SitemapError extends Error {
   constructor(message: string) {
@@ -184,6 +186,90 @@ export async function parseSitemap(inputUrl: string): Promise<SitemapParseResult
     isIndex,
     childSitemaps: Array.from(childSitemaps),
     skipped,
+  };
+}
+
+/** 单个 sitemap 的解析结果（批量场景下用于逐个展示） */
+export interface SitemapItemResult {
+  /** 输入的 sitemap 地址 */
+  url: string;
+  /** 是否解析成功 */
+  ok: boolean;
+  /** 解析出的链接数 */
+  count: number;
+  /** 是否为 sitemap 索引 */
+  isIndex: boolean;
+  /** 展开的子 sitemap 数量 */
+  childSitemaps: number;
+  /** 被跳过的子 sitemap */
+  skipped: string[];
+  /** 失败原因 */
+  error?: string;
+}
+
+export interface SitemapBatchResult {
+  /** 每个 sitemap 的解析结果 */
+  items: SitemapItemResult[];
+  /** 每个 sitemap 解析出的链接（按输入顺序分组，用于逐个提交） */
+  groups: Array<{ sitemap: string; urls: string[] }>;
+  /** 合并去重后的全部链接 */
+  urls: string[];
+  /** 解析失败的 sitemap 数量 */
+  failed: number;
+}
+
+/**
+ * 批量解析多个 sitemap：单个失败不影响其它 sitemap，最终链接合并去重。
+ * 同时保留每个 sitemap 各自的链接分组，便于按 sitemap 逐个提交。
+ */
+export async function parseSitemapBatch(inputs: string[]): Promise<SitemapBatchResult> {
+  const parsed = await mapWithConcurrency(inputs, BATCH_CONCURRENCY, async (input) => {
+    try {
+      const result = await parseSitemap(input);
+      return {
+        summary: {
+          url: input,
+          ok: true,
+          count: result.urls.length,
+          isIndex: result.isIndex,
+          childSitemaps: result.childSitemaps.length,
+          skipped: result.skipped,
+        } satisfies SitemapItemResult,
+        urls: result.urls,
+      };
+    } catch (error) {
+      return {
+        summary: {
+          url: input,
+          ok: false,
+          count: 0,
+          isIndex: false,
+          childSitemaps: 0,
+          skipped: [],
+          error: error instanceof Error ? error.message : '未知错误',
+        } satisfies SitemapItemResult,
+        urls: [] as string[],
+      };
+    }
+  });
+
+  // mapWithConcurrency 按下标回填，结果顺序与输入一致
+  const ordered = parsed;
+
+  const items = ordered.map((entry) => entry.summary);
+  const merged = new Set<string>();
+  const groups: Array<{ sitemap: string; urls: string[] }> = [];
+
+  for (const entry of ordered) {
+    groups.push({ sitemap: entry.summary.url, urls: entry.urls });
+    for (const url of entry.urls) merged.add(url);
+  }
+
+  return {
+    items,
+    groups,
+    urls: Array.from(merged),
+    failed: items.filter((item) => !item.ok).length,
   };
 }
 
