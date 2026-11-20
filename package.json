@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test": "tsx scripts/test-push.ts && tsx scripts/test-push-groups.ts && tsx scripts/test-sitemap-batch.ts && tsx scripts/test-site.ts && tsx scripts/test-submit-route.ts",
+    "test": "tsx scripts/test-push.ts && tsx scripts/test-push-groups.ts && tsx scripts/test-sitemap-batch.ts && tsx scripts/test-site.ts && tsx scripts/test-urls.ts && tsx scripts/test-submit-route.ts && tsx scripts/test-submit-urls-route.ts",
     "test:e2e": "node scripts/test-e2e-overlap.js"
   },
   "dependencies": {

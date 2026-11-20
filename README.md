@@ -1,6 +1,9 @@
-# sitemap 批量提交到百度
+# 批量提交链接到百度
 
-输入一个或多个 `sitemap.xml` 地址，自动解析出其中的全部 URL，并按百度「链接推送」接口要求（每行一条、`text/plain`）批量提交。
+两种方式向百度「链接推送」接口提交链接，都按每行一条的格式（`text/plain`）推送：
+
+- **sitemap 提交**：输入一个或多个 `sitemap.xml` 地址，自动解析出其中的全部 URL 后批量提交；
+- **URL 批量提交**：直接粘贴一批 URL，跳过解析直接提交。
 
 ## 快速开始
 
@@ -22,6 +25,10 @@ npm run dev
 
 ## 使用方式
 
+首页有两个页签，按需要切换。
+
+### 页签一：sitemap 提交
+
 1. 在页面的多行输入框里填写 sitemap 地址，**每行一个**，可以填多个（例如 `sitemap.xml`、`sitemap-products.xml`、`sitemap-blog.xml`）。
 2. 填入 token（token 对所有 sitemap 共用）；留空时使用环境变量。
 3. **站点（site）留空即可**，每个 sitemap 会自动取自己链接中出现最多的裸域名；只有当自动推断不符合预期时才需要手动填写。
@@ -29,6 +36,20 @@ npm run dev
 5. 点「开始提交」，页面展示各 sitemap 的解析结果、域名分布，以及逐条 URL 的推送结果。
 
 **每个 sitemap 独立提交**：某个 sitemap 部分失败或整体失败（配额用尽、接口报错、网络异常、链接被全部过滤）都不会影响后面的 sitemap，它们会继续提交。
+
+### 页签二：URL 批量提交
+
+适合手头已经有一批 URL、只想直接推给百度的场景，不必先做 sitemap。
+
+1. 在多行输入框里粘贴要提交的 URL，**每行一个**。
+2. 填入 token；留空时使用环境变量。
+3. **站点（site）留空即可**，自动取这批 URL 中出现次数最多的裸域名；填了就以填写的为准（所有 URL 共用这一个站点）。
+4. 先点「仅校验预览」确认条数、域名分布与哪些链接有问题。
+5. 点「开始提交」，页面展示域名分布与逐条 URL 的推送结果。
+
+- **本地校验**：不是合法 URL 的条目（缺协议头、协议不支持等）在本地就被拦下，不会发给百度，也不占用当日配额；重复的 URL 只提交一次，其余标记为「未重复提交」。
+- **站点过滤**：默认过滤掉与 site 不同域名的链接（可在页面上关闭），被过滤的条数会单独统计。
+- **配额**：与 sitemap 模式一致，先用 1 条探测拿到 `remain`，再按 `min(2000, remain)` 分批提交；配额用尽时保留已成功的结果并提示剩余未提交条数。
 
 ## 行为说明
 
@@ -60,22 +81,30 @@ npm run dev
 ```
 submit_url/
 ├─ app/
-│  ├─ api/submit/route.ts   # 解析 + 推送接口
+│  ├─ api/submit/route.ts       # sitemap 解析 + 推送接口
+│  ├─ api/submit-urls/route.ts  # 直接提交 URL 的推送接口
 │  ├─ globals.css
 │  ├─ layout.tsx
 │  └─ page.tsx
-├─ components/SubmitForm.tsx
+├─ components/
+│  ├─ HomeTabs.tsx       # 首页页签容器
+│  ├─ SubmitForm.tsx     # sitemap 提交表单
+│  └─ UrlSubmitForm.tsx  # URL 批量提交表单
 ├─ lib/
 │  ├─ baidu.ts              # 百度推送客户端
 │  ├─ site.ts               # site 规范化与自动推断
-│  └─ sitemap.ts            # sitemap 抓取与解析（含多 sitemap 批量解析）
+│  ├─ sitemap.ts            # sitemap 抓取与解析（含多 sitemap 批量解析）
+│  └─ urls.ts               # URL 列表的拆分、校验与去重
 ├─ scripts/
 │  ├─ test-push.ts            # 推送客户端单元测试（mock fetch，不产生真实推送）
 │  ├─ test-push-groups.ts     # 分组推送 / 配额耗尽行为测试
 │  ├─ test-sitemap-batch.ts   # 批量解析测试（mock fetch）
 │  ├─ test-site.ts            # 站点推断测试
+│  ├─ test-urls.ts            # URL 列表解析与校验测试
 │  ├─ test-submit-route.ts    # 接口级测试：某个 sitemap 失败不影响后续 sitemap
+│  ├─ test-submit-urls-route.ts # 接口级测试：URL 批量提交接口
 │  ├─ test-e2e-overlap.js     # 端到端联调（需先起开发服务器）：跨 sitemap 去重、配额耗尽与接口报错的失败隔离
+│  ├─ test-e2e-urls.js        # 端到端联调（需先起开发服务器）：URL 批量提交的站点推断、过滤、预览与配额
 │  ├─ test-e2e-failover.js    # 端到端联调：假 sitemap 服务 + 假百度接口
 │  └─ test-sitemap-server.js  # 本地 sitemap 样例服务器
 ├─ .env.example
@@ -122,6 +151,15 @@ BAIDU_ENDPOINT=http://localhost:8900/urls npm run dev
 BAIDU_ENDPOINT=http://localhost:8900/urls BAIDU_TOKEN=test-token npx next dev -p 3111
 # 终端 2：执行断言（脚本自带假 sitemap 服务与假百度接口）
 npm run test:e2e
+```
+
+`scripts/test-e2e-urls.js` 是「URL 批量提交」页签的自动化端到端测试，覆盖站点自动推断、页面填写 site 优先、本地拦截非法与重复链接、预览模式不调用百度、配额耗尽五个场景。脚本自带假百度接口（8900）：
+
+```bash
+# 终端 1：让开发服务器指向假百度接口
+BAIDU_ENDPOINT=http://localhost:8900/urls BAIDU_TOKEN=test-token npx next dev -p 3111
+# 终端 2：执行断言
+node scripts/test-e2e-urls.js
 ```
 
 ## 需求文档
